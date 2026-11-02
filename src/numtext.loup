@@ -1,0 +1,408 @@
+@mode(host.dual)
+
+# numtext — reading a number the user typed and writing a number for display,
+# with no AppKit and no float formatting from the runtime: both are done here
+# digit by digit, so the text is the same under the interpreter, the
+# self-hosted native build and the Stage0 native build.
+#
+#   parseNumber("1,234.5")      → Parsed(ok = true, value = 1234.5)
+#   parseNumber("1,5")          → Parsed(ok = false, …)   (not a group of three)
+#   parseNumber("1e400")        → Parsed(ok = false, overflow = true, …)
+#   formatFixed(1234.5678, 2)   → "1,234.57"
+#   formatTrimmed(0.621371, 6)  → "0.621371"   (trailing zeros dropped)
+#   formatFixed(1.5e20, 2)      → "1.50e+20"   (10^15 and above)
+#   formatResult(0.00054, 2)    → "5.40e-4"    (not "0.00")
+#   formatResult(0.5, 0)        → "1"          (rounds to a non-zero place)
+
+## Magnitudes from here up are written in scientific notation: the whole part
+## is formatted as an `int`, and above this a double no longer holds every
+## integer exactly, so more digits would only be noise.
+const FIXED_LIMIT: float = 1000000000000000.0;
+## Exponent digits past this value are still read but no longer accumulated
+## (the number is far outside a double's range either way).
+const EXPONENT_CAP: int = 100000;
+## Powers of ten are applied in steps of at most this many, so that 10^n
+## itself stays finite while the scaled value moves towards 0 or infinity.
+const SCALE_STEP: int = 300;
+
+## The result of `parseNumber`: `ok` is false when the text is not a number
+## (`value` is then 0.0); `overflow` is true when it is a number but too large
+## for a double (`ok` is then false too).
+pub class Parsed {
+    pub let ok: bool;
+    pub let value: float;
+    pub let overflow: bool;
+
+    pub func constructor(ok: bool, value: float, overflow: bool) {
+        this.ok = ok;
+        this.value = value;
+        this.overflow = overflow;
+    }
+}
+
+## Whether `x` is a finite number (not infinite, not NaN): infinity minus
+## itself is NaN, and NaN is not equal to itself.
+pub func isFinite(x: float): bool {
+    let d = x - x;
+    let finite = d == d;
+    return finite;
+}
+
+## The value of the ASCII digit `c`, or -1 when `c` is not a digit.
+func digitValue(c: string): int {
+    let digits = "0123456789";
+    var i = 0;
+    while (i < 10) {
+        if (digits[i] == c) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+## 10 raised to `n` (n >= 0) as a float.
+pub func pow10(n: int): float {
+    var p = 1.0;
+    var i = 0;
+    while (i < n) {
+        p = p * 10.0;
+        i = i + 1;
+    }
+    return p;
+}
+
+## 10 raised to `n` (0 <= n <= 18) as an int.
+func pow10Int(n: int): int {
+    var p = 1;
+    var i = 0;
+    while (i < n) {
+        p = p * 10;
+        i = i + 1;
+    }
+    return p;
+}
+
+## `value` × 10^`shift`, in steps that keep each power of ten finite.
+func scaleByPow10(value: float, shift: int): float {
+    var scaled = value;
+    var remaining = shift;
+    while (remaining > SCALE_STEP) {
+        scaled = scaled * pow10(SCALE_STEP);
+        remaining = remaining - SCALE_STEP;
+    }
+    while (remaining < 0 - SCALE_STEP) {
+        scaled = scaled / pow10(SCALE_STEP);
+        remaining = remaining + SCALE_STEP;
+    }
+    if (remaining > 0) {
+        scaled = scaled * pow10(remaining);
+    } else if (remaining < 0) {
+        # Dividing by an exact power of ten keeps "0.1" as close to 0.1 as a
+        # double gets.
+        scaled = scaled / pow10(0 - remaining);
+    }
+    return scaled;
+}
+
+## `text` without leading and trailing spaces and tabs.
+pub func trimSpaces(text: string): string {
+    var start = 0;
+    var end = text.len();
+    while (start < end and (text[start] == " " or text[start] == "\t")) {
+        start = start + 1;
+    }
+    while (end > start and (text[end - 1] == " " or text[end - 1] == "\t")) {
+        end = end - 1;
+    }
+    let trimmed = text.substring(start, end);
+    return trimmed;
+}
+
+## Read a decimal number: an optional sign, digits, an optional fraction after
+## "." and an optional exponent ("1.5e3"). Spaces around it are ignored.
+##
+## The whole part may group its digits with commas, as in "1,234,567": the
+## first group has one to three digits and does not start with 0, and every
+## later group has exactly three. Any other comma ("1,5", "12,34", "1,2,3",
+## ",5", "5,", "0,500", "012,345") makes the text not a number — a decimal
+## comma must not silently read as a thousands separator. (A leading zero
+## without commas, "0500", is still 500.)
+##
+## Anything else — an empty text, a lone sign or ".", stray letters — is not a
+## number. A number too large for a double ("1e400") is not one either, and
+## sets `overflow`.
+pub func parseNumber(text: string): Parsed {
+    let s = trimSpaces(text);
+    let n = s.len();
+    var i = 0;
+    var negative = false;
+    if (i < n and (s[i] == "-" or s[i] == "+")) {
+        negative = s[i] == "-";
+        i = i + 1;
+    }
+
+    # The whole part, with its thousands groups checked.
+    var mantissa = 0.0;
+    var digits_seen = 0;
+    var group_digits = 0;
+    var commas = 0;
+    var leading_zero = false;
+    while (i < n) {
+        let c = s[i];
+        let d = digitValue(c);
+        if (d >= 0) {
+            if (digits_seen == 0) {
+                leading_zero = d == 0;
+            }
+            mantissa = mantissa * 10.0 + (d as float);
+            digits_seen = digits_seen + 1;
+            group_digits = group_digits + 1;
+        } else if (c == ",") {
+            # A first group that starts with 0 is never a thousands group:
+            # "0,500" is a decimal comma (0.5), not 500.
+            let first_group_ok = commas == 0 and group_digits >= 1 and group_digits <= 3 and not leading_zero;
+            let later_group_ok = commas > 0 and group_digits == 3;
+            if (not first_group_ok and not later_group_ok) {
+                let misplaced = Parsed(false, 0.0, false);
+                return misplaced;
+            }
+            commas = commas + 1;
+            group_digits = 0;
+        } else {
+            break;
+        }
+        i = i + 1;
+    }
+    if (commas > 0 and group_digits != 3) {
+        let short_group = Parsed(false, 0.0, false);
+        return short_group;
+    }
+
+    # The fraction.
+    var fraction_digits = 0;
+    if (i < n and s[i] == ".") {
+        i = i + 1;
+        while (i < n and digitValue(s[i]) >= 0) {
+            mantissa = mantissa * 10.0 + (digitValue(s[i]) as float);
+            fraction_digits = fraction_digits + 1;
+            i = i + 1;
+        }
+    }
+    if (digits_seen + fraction_digits == 0) {
+        let none = Parsed(false, 0.0, false);
+        return none;
+    }
+
+    # The exponent.
+    var exponent = 0;
+    if (i < n and (s[i] == "e" or s[i] == "E")) {
+        i = i + 1;
+        var exp_negative = false;
+        if (i < n and (s[i] == "-" or s[i] == "+")) {
+            exp_negative = s[i] == "-";
+            i = i + 1;
+        }
+        var exp_digits = 0;
+        while (i < n and digitValue(s[i]) >= 0) {
+            if (exponent < EXPONENT_CAP) {
+                exponent = exponent * 10 + digitValue(s[i]);
+            }
+            exp_digits = exp_digits + 1;
+            i = i + 1;
+        }
+        if (exp_digits == 0) {
+            let bad_exponent = Parsed(false, 0.0, false);
+            return bad_exponent;
+        }
+        if (exp_negative) {
+            exponent = 0 - exponent;
+        }
+    }
+    if (i != n) {
+        let trailing = Parsed(false, 0.0, false);
+        return trailing;
+    }
+
+    # Scale once at the end.
+    var value = scaleByPow10(mantissa, exponent - fraction_digits);
+    if (not isFinite(value)) {
+        let too_large = Parsed(false, 0.0, true);
+        return too_large;
+    }
+    if (negative) {
+        value = 0.0 - value;
+    }
+    let parsed = Parsed(true, value, false);
+    return parsed;
+}
+
+## `whole` (>= 0) with a comma between each group of three digits.
+func groupThousands(whole: int): string {
+    let plain = whole.to_string();
+    var out = "";
+    var i = 0;
+    let n = plain.len();
+    while (i < n) {
+        if (i > 0 and (n - i) % 3 == 0) {
+            out = out + ",";
+        }
+        out = out + plain[i];
+        i = i + 1;
+    }
+    return out;
+}
+
+## `value` with exactly `decimals` digits after the point (0..6), rounded half
+## away from zero, thousands grouped with commas: 1234.5 → "1,234.50". A value
+## that rounds to zero is never negative ("-0.00" is written "0.00").
+## Magnitudes of 10^15 and above are written in scientific notation
+## (`formatScientific`) whatever `decimals` is, so choosing more places never
+## turns a readable number into an exponent.
+pub func formatFixed(value: float, decimals: int): string {
+    if (value != value) {
+        return "NaN";
+    }
+    var magnitude = value;
+    let negative = value < 0.0;
+    if (negative) {
+        magnitude = 0.0 - value;
+    }
+    if (magnitude >= FIXED_LIMIT) {
+        let sci = formatScientific(value, decimals);
+        return sci;
+    }
+    let scale = pow10Int(decimals);
+    var whole = 0;
+    var scaled_fraction = 0;
+    if (magnitude * pow10(decimals) < FIXED_LIMIT) {
+        # Round value × 10^decimals in one go (an int holds it exactly).
+        let scaled = (magnitude * pow10(decimals) + 0.5) as int;
+        whole = scaled / scale;
+        scaled_fraction = scaled % scale;
+    } else {
+        # Too many digits for that (8e9 at 6 places): the whole part as an
+        # int, the fraction rounded on its own.
+        whole = magnitude as int;
+        let fraction = magnitude - (whole as float);
+        scaled_fraction = (fraction * pow10(decimals) + 0.5) as int;
+        if (scaled_fraction >= scale) {
+            # 0.9999999 to six places is 1.000000: carry into the whole part.
+            whole = whole + 1;
+            scaled_fraction = scaled_fraction - scale;
+        }
+    }
+    var text = groupThousands(whole);
+    if (decimals > 0) {
+        var frac = scaled_fraction.to_string();
+        while (frac.len() < decimals) {
+            frac = "0" + frac;
+        }
+        text = text + "." + frac;
+    }
+    if (negative and (whole != 0 or scaled_fraction != 0)) {
+        text = "-" + text;
+    }
+    return text;
+}
+
+## `value` as a mantissa with `decimals` digits after the point and a power of
+## ten: 1.5e20 → "1.50e+20" (2 decimals), 0.000123 → "1.2e-4" (1 decimal).
+pub func formatScientific(value: float, decimals: int): string {
+    if (value != value) {
+        return "NaN";
+    }
+    var magnitude = value;
+    let negative = value < 0.0;
+    if (negative) {
+        magnitude = 0.0 - value;
+    }
+    if (magnitude == 0.0) {
+        let zero = formatFixed(0.0, decimals) + "e+0";
+        return zero;
+    }
+    if (not isFinite(magnitude)) {
+        var infinite = "Infinity";
+        if (negative) {
+            infinite = "-Infinity";
+        }
+        return infinite;
+    }
+    var exponent = 0;
+    while (magnitude >= 10.0) {
+        magnitude = magnitude / 10.0;
+        exponent = exponent + 1;
+    }
+    while (magnitude < 1.0) {
+        magnitude = magnitude * 10.0;
+        exponent = exponent - 1;
+    }
+    let scale = pow10Int(decimals);
+    var scaled = (magnitude * pow10(decimals) + 0.5) as int;
+    if (scaled >= 10 * scale) {
+        # 9.996 rounded to two decimals is 10.00: renormalize to 1.00e+1.
+        scaled = scaled / 10;
+        exponent = exponent + 1;
+    }
+    var text = (scaled / scale).to_string();
+    if (decimals > 0) {
+        var frac = (scaled % scale).to_string();
+        while (frac.len() < decimals) {
+            frac = "0" + frac;
+        }
+        text = text + "." + frac;
+    }
+    var sign = "+";
+    if (exponent < 0) {
+        sign = "-";
+        exponent = 0 - exponent;
+    }
+    text = text + "e" + sign + exponent.to_string();
+    if (negative) {
+        text = "-" + text;
+    }
+    return text;
+}
+
+## A converted value for display: `formatFixed`, except that a non-zero value
+## that would round to zero at `decimals` places (below half of the last
+## place, 0.5 × 10^-decimals) is written in scientific notation instead of
+## reading as zero: at 2 places 0.00054 is "5.40e-4", not "0.00", while
+## 0.0054 rounds to "0.01"; at 0 places 0.3 is "3e-1" and 0.5 is "1". Zero
+## itself stays "0.00".
+pub func formatResult(value: float, decimals: int): string {
+    var magnitude = value;
+    if (magnitude < 0.0) {
+        magnitude = 0.0 - magnitude;
+    }
+    let shifted = magnitude * pow10(decimals);
+    if (magnitude > 0.0 and shifted < 1.0) {
+        # The same rounding as formatFixed (half away from zero).
+        let rounded = (shifted + 0.5) as int;
+        if (rounded == 0) {
+            let tiny = formatScientific(value, decimals);
+            return tiny;
+        }
+    }
+    let fixed = formatFixed(value, decimals);
+    return fixed;
+}
+
+## `value` with up to `decimals` digits after the point, trailing zeros (and
+## a bare point) dropped: 0.621371 → "0.621371", 1609.344 → "1,609.344",
+## 1000.0 → "1,000".
+pub func formatTrimmed(value: float, decimals: int): string {
+    let fixed = formatFixed(value, decimals);
+    if (fixed.contains("e") or not fixed.contains(".")) {
+        return fixed;
+    }
+    var end = fixed.len();
+    while (fixed[end - 1] == "0") {
+        end = end - 1;
+    }
+    if (fixed[end - 1] == ".") {
+        end = end - 1;
+    }
+    let trimmed = fixed.substring(0, end);
+    return trimmed;
+}

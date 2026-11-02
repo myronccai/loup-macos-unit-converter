@@ -1,0 +1,395 @@
+@mode(host.dual)
+
+# units — the unit tables and the conversions the converter window shows.
+#
+# Every unit converts to its category's base unit (metre, kilogram, kelvin,
+# litre, metre per second, byte) by the affine map
+#
+#     base = (value + offset) × factor        value = base / factor − offset
+#
+# Most units are a plain factor (offset 0). Temperature needs the offset:
+# Celsius is (°C + 273.15) × 1 K and Fahrenheit is (°F + 459.67) × 5/9 K, so
+# 0 °C is 32 °F, not 0 °F.
+#
+# Categories and units are addressed by their index in the lists below, which
+# is also their position in the window's pop-up menus. The tables are small
+# and rebuilt on each call; a refresh of the window builds the current one
+# twice (result and rate line).
+
+from numtext import (parseNumber, trimSpaces, isFinite, formatResult, formatTrimmed);
+
+## Category indexes (positions in `categoryNames()`).
+pub const LENGTH: int = 0;
+pub const MASS: int = 1;
+pub const TEMPERATURE: int = 2;
+pub const VOLUME: int = 3;
+pub const SPEED: int = 4;
+pub const DATA_SIZE: int = 5;
+
+## What the result shows for an empty input.
+pub const EMPTY_RESULT: string = "—";
+## What the result shows when the input is not a number.
+pub const INVALID_RESULT: string = "Not a number";
+## What the result shows for a temperature below 0 K.
+pub const BELOW_ABSOLUTE_ZERO: string = "Below absolute zero";
+## What the result shows when the number typed, or the result, is beyond a
+## double's range ("1e400").
+pub const TOO_LARGE_RESULT: string = "Too large";
+
+## Digits the rate line ("1 km = 0.621371 mi") shows at most.
+const RATE_DECIMALS: int = 6;
+## A rate below this is shown the other way round ("1 TiB = … bit") so that
+## it does not read "1 bit = 0 TiB".
+const SMALLEST_RATE: float = 0.001;
+## Below this a conversion's offset (or its scale's distance from 1) counts as
+## none: only the temperature scales have one.
+const AFFINE_EPSILON: float = 0.000000001;
+## How far below 0 K a temperature may fall and still count as absolute zero:
+## -273.15 °C (or -459.67 °F) is exactly 0 K, give or take float rounding.
+const ABSOLUTE_ZERO_TOLERANCE: float = 0.000000001;
+
+## One unit: its full name, its symbol and its affine map to the base unit.
+pub class Unit {
+    pub let name: string;
+    pub let symbol: string;
+    pub let factor: float;
+    pub let offset: float;
+
+    pub func constructor(name: string, symbol: string, factor: float, offset: float) {
+        this.name = name;
+        this.symbol = symbol;
+        this.factor = factor;
+        this.offset = offset;
+    }
+
+    ## The pop-up menu title, e.g. "Kilometer (km)".
+    pub func title(): string {
+        let t = this.name + " (" + this.symbol + ")";
+        return t;
+    }
+
+    ## `value` in this unit, expressed in the base unit.
+    pub func toBase(value: float): float {
+        let base = (value + this.offset) * this.factor;
+        return base;
+    }
+
+    ## `base` (in the base unit), expressed in this unit.
+    pub func fromBase(base: float): float {
+        let value = base / this.factor - this.offset;
+        return value;
+    }
+}
+
+## A plain multiple of the base unit.
+func scaled(name: string, symbol: string, factor: float): Unit {
+    let u = Unit(name, symbol, factor, 0.0);
+    return u;
+}
+
+## The category names, in pop-up order.
+pub func categoryNames(): list[string] {
+    let names = ["Length", "Mass", "Temperature", "Volume", "Speed", "Data size"];
+    return names;
+}
+
+## The units of `category`, in pop-up order (a ValueError for an unknown
+## category).
+pub func unitsOf(category: int): list[Unit] {
+    var units: list[Unit] = [];
+    if (category == LENGTH) {
+        # Base: metre.
+        units.push(scaled("Millimeter", "mm", 0.001));
+        units.push(scaled("Centimeter", "cm", 0.01));
+        units.push(scaled("Meter", "m", 1.0));
+        units.push(scaled("Kilometer", "km", 1000.0));
+        units.push(scaled("Inch", "in", 0.0254));
+        units.push(scaled("Foot", "ft", 0.3048));
+        units.push(scaled("Yard", "yd", 0.9144));
+        units.push(scaled("Mile", "mi", 1609.344));
+        units.push(scaled("Nautical mile", "nmi", 1852.0));
+    } else if (category == MASS) {
+        # Base: kilogram.
+        units.push(scaled("Milligram", "mg", 0.000001));
+        units.push(scaled("Gram", "g", 0.001));
+        units.push(scaled("Kilogram", "kg", 1.0));
+        units.push(scaled("Tonne", "t", 1000.0));
+        units.push(scaled("Ounce", "oz", 0.028349523125));
+        units.push(scaled("Pound", "lb", 0.45359237));
+        units.push(scaled("Stone", "st", 6.35029318));
+    } else if (category == TEMPERATURE) {
+        # Base: kelvin.
+        units.push(Unit("Celsius", "°C", 1.0, 273.15));
+        units.push(Unit("Fahrenheit", "°F", 5.0 / 9.0, 459.67));
+        units.push(Unit("Kelvin", "K", 1.0, 0.0));
+        units.push(Unit("Rankine", "°R", 5.0 / 9.0, 0.0));
+    } else if (category == VOLUME) {
+        # Base: litre. The kitchen measures are US customary.
+        units.push(scaled("Milliliter", "mL", 0.001));
+        units.push(scaled("Liter", "L", 1.0));
+        units.push(scaled("Cubic meter", "m³", 1000.0));
+        units.push(scaled("Teaspoon", "tsp", 0.00492892159375));
+        units.push(scaled("Tablespoon", "tbsp", 0.01478676478125));
+        units.push(scaled("Fluid ounce", "fl oz", 0.0295735295625));
+        units.push(scaled("Cup", "cup", 0.2365882365));
+        units.push(scaled("Pint", "pt", 0.473176473));
+        units.push(scaled("Quart", "qt", 0.946352946));
+        units.push(scaled("Gallon", "gal", 3.785411784));
+        units.push(scaled("Imperial gallon", "imp gal", 4.54609));
+    } else if (category == SPEED) {
+        # Base: metre per second.
+        units.push(scaled("Meters per second", "m/s", 1.0));
+        units.push(scaled("Kilometers per hour", "km/h", 1000.0 / 3600.0));
+        units.push(scaled("Miles per hour", "mph", 0.44704));
+        units.push(scaled("Feet per second", "ft/s", 0.3048));
+        units.push(scaled("Knot", "kn", 1852.0 / 3600.0));
+    } else if (category == DATA_SIZE) {
+        # Base: byte. Decimal (SI) prefixes, then binary (IEC) prefixes.
+        units.push(scaled("Bit", "bit", 0.125));
+        units.push(scaled("Byte", "B", 1.0));
+        units.push(scaled("Kilobyte", "kB", 1000.0));
+        units.push(scaled("Megabyte", "MB", 1000000.0));
+        units.push(scaled("Gigabyte", "GB", 1000000000.0));
+        units.push(scaled("Terabyte", "TB", 1000000000000.0));
+        units.push(scaled("Kibibyte", "KiB", 1024.0));
+        units.push(scaled("Mebibyte", "MiB", 1048576.0));
+        units.push(scaled("Gibibyte", "GiB", 1073741824.0));
+        units.push(scaled("Tebibyte", "TiB", 1099511627776.0));
+    } else {
+        throw ValueError("units: unknown category " + category.to_string());
+    }
+    return units;
+}
+
+## The unit at `index` in the list `units` of `category` (a ValueError when
+## out of range).
+func pickUnit(units: list[Unit], category: int, index: int): Unit {
+    if (index < 0 or index >= units.len()) {
+        throw ValueError("units: category " + category.to_string() + " has no unit " + index.to_string());
+    }
+    let u = units[index];
+    return u;
+}
+
+## The unit at `index` in `category` (a ValueError when out of range).
+pub func unitAt(category: int, index: int): Unit {
+    let units = unitsOf(category);
+    let u = pickUnit(units, category, index);
+    return u;
+}
+
+## The index of the unit with `symbol` in `category` (a ValueError when there
+## is none).
+pub func unitIndexOf(category: int, symbol: string): int {
+    let units = unitsOf(category);
+    var i = 0;
+    while (i < units.len()) {
+        if (units[i].symbol == symbol) {
+            return i;
+        }
+        i = i + 1;
+    }
+    throw ValueError("units: category " + category.to_string() + " has no unit '" + symbol + "'");
+}
+
+## The pop-up titles of the units of `category`.
+pub func unitTitles(category: int): list[string] {
+    let units = unitsOf(category);
+    var titles: list[string] = [];
+    for (u in units) {
+        titles.push(u.title());
+    }
+    return titles;
+}
+
+## The symbols of the pair a category starts converting when it is chosen:
+## [from, to]. Looked up by symbol, so adding a unit to a table never moves
+## the defaults.
+func defaultSymbols(category: int): list[string] {
+    if (category == LENGTH) {
+        let length = ["km", "mi"];
+        return length;
+    } else if (category == MASS) {
+        let mass = ["kg", "lb"];
+        return mass;
+    } else if (category == TEMPERATURE) {
+        let temperature = ["°C", "°F"];
+        return temperature;
+    } else if (category == VOLUME) {
+        let volume = ["L", "gal"];
+        return volume;
+    } else if (category == SPEED) {
+        let speed = ["km/h", "mph"];
+        return speed;
+    } else if (category == DATA_SIZE) {
+        let data = ["MB", "MiB"];
+        return data;
+    }
+    throw ValueError("units: unknown category " + category.to_string());
+}
+
+## The unit a category starts converting from when it is chosen.
+pub func defaultFrom(category: int): int {
+    let pair = defaultSymbols(category);
+    let index = unitIndexOf(category, pair[0]);
+    return index;
+}
+
+## The unit a category starts converting to when it is chosen.
+pub func defaultTo(category: int): int {
+    let pair = defaultSymbols(category);
+    let index = unitIndexOf(category, pair[1]);
+    return index;
+}
+
+## `value` in unit `source` converted to unit `target`. A pair of plain
+## factors is converted by their ratio rather than through the base unit, so
+## that a tiny value is never pushed through an even tinier intermediate
+## (1e-320 mm is 1e-323 m, where a double keeps only one digit); an affine
+## pair goes through the base unit.
+func convertBetween(source: Unit, target: Unit, value: float): float {
+    if (source.offset == 0.0 and target.offset == 0.0) {
+        let ratio = source.factor / target.factor;
+        let direct = value * ratio;
+        return direct;
+    }
+    let base = source.toBase(value);
+    let converted = target.fromBase(base);
+    return converted;
+}
+
+## `value` in unit `from` of `category`, converted to unit `to`.
+pub func convert(category: int, from_unit: int, to_unit: int, value: float): float {
+    let units = unitsOf(category);
+    let source = pickUnit(units, category, from_unit);
+    let target = pickUnit(units, category, to_unit);
+    let converted = convertBetween(source, target, value);
+    return converted;
+}
+
+## The decimal places the precision control offers, in segment order.
+pub func decimalChoices(): list[int] {
+    let choices = [0, 2, 4, 6];
+    return choices;
+}
+
+## The decimal places of precision segment `segment` (a ValueError when out
+## of range).
+pub func decimalsAt(segment: int): int {
+    let choices = decimalChoices();
+    if (segment < 0 or segment >= choices.len()) {
+        throw ValueError("units: no precision segment " + segment.to_string());
+    }
+    let decimals = choices[segment];
+    return decimals;
+}
+
+## The precision control's segment labels ("0", "2", "4", "6").
+pub func decimalLabels(): list[string] {
+    var labels: list[string] = [];
+    for (d in decimalChoices()) {
+        labels.push(d.to_string());
+    }
+    return labels;
+}
+
+## What the result label shows for the typed text `input` converted from unit
+## `from` to unit `to` of `category` with `decimals` places: "0.62 mi",
+## EMPTY_RESULT for blank input, INVALID_RESULT for text that is not a number,
+## TOO_LARGE_RESULT for a number (or a result) beyond a double's range,
+## BELOW_ABSOLUTE_ZERO for a temperature colder than 0 K. A non-zero result
+## that would round to zero at `decimals` places is written in scientific
+## notation (`formatResult`), never as zero.
+pub func resultText(category: int, from_unit: int, to_unit: int, input: string, decimals: int): string {
+    if (trimSpaces(input).len() == 0) {
+        return EMPTY_RESULT;
+    }
+    let parsed = parseNumber(input);
+    if (parsed.overflow) {
+        return TOO_LARGE_RESULT;
+    }
+    if (not parsed.ok) {
+        return INVALID_RESULT;
+    }
+    let units = unitsOf(category);
+    let source = pickUnit(units, category, from_unit);
+    let target = pickUnit(units, category, to_unit);
+    if (category == TEMPERATURE) {
+        let kelvin = source.toBase(parsed.value);
+        if (kelvin < 0.0 - ABSOLUTE_ZERO_TOLERANCE) {
+            return BELOW_ABSOLUTE_ZERO;
+        }
+    }
+    let converted = convertBetween(source, target, parsed.value);
+    if (not isFinite(converted)) {
+        return TOO_LARGE_RESULT;
+    }
+    let text = formatResult(converted, decimals) + " " + target.symbol;
+    return text;
+}
+
+## `x` without its sign.
+func absolute(x: float): float {
+    var a = x;
+    if (a < 0.0) {
+        a = 0.0 - a;
+    }
+    return a;
+}
+
+## " + 32" or " − 17.5": `amount` as a term added to a formula.
+func formulaTerm(amount: float): string {
+    var op = " + ";
+    if (amount < 0.0) {
+        op = " − ";
+    }
+    let term = op + formatTrimmed(absolute(amount), RATE_DECIMALS);
+    return term;
+}
+
+## The formula of the affine map `to = from × scale + shift`, written the way
+## people write temperature conversions:
+##   "°F = °C × 1.8 + 32"   (scale above 1)
+##   "°C = (°F − 32) ÷ 1.8" (scale below 1: shown as a divisor above 1)
+##   "°C = K − 273.15"      (scale 1)
+func affineFormula(from_symbol: string, to_symbol: string, scale: float, shift: float): string {
+    let head = to_symbol + " = ";
+    if (absolute(scale - 1.0) < AFFINE_EPSILON) {
+        let plain = head + from_symbol + formulaTerm(shift);
+        return plain;
+    }
+    if (scale > 1.0) {
+        let times = head + from_symbol + " × " + formatTrimmed(scale, RATE_DECIMALS) + formulaTerm(shift);
+        return times;
+    }
+    # to = (from + shift / scale) ÷ (1 / scale)
+    let divided = head + "(" + from_symbol + formulaTerm(shift / scale) + ") ÷ "
+        + formatTrimmed(1.0 / scale, RATE_DECIMALS);
+    return divided;
+}
+
+## The rate line under the result. For a plain factor it is what one `from`
+## is in `to`: "1 km = 0.621371 mi"; when that is a tiny fraction (1 bit in
+## TiB) the line is turned round to "1 TiB = 8,796,093,022,208 bit". For an
+## affine pair (temperatures with different zero points) "1 °C = 33.8 °F"
+## would read like a scale factor, so the line is the formula instead:
+## "°F = °C × 1.8 + 32".
+pub func rateText(category: int, from_unit: int, to_unit: int): string {
+    let units = unitsOf(category);
+    let source = pickUnit(units, category, from_unit);
+    let target = pickUnit(units, category, to_unit);
+    # to = from × scale + shift (from the two maps to the base unit).
+    let scale = source.factor / target.factor;
+    let shift = source.offset * source.factor / target.factor - target.offset;
+    if (absolute(shift) > AFFINE_EPSILON) {
+        let formula = affineFormula(source.symbol, target.symbol, scale, shift);
+        return formula;
+    }
+    if (scale < SMALLEST_RATE) {
+        let inverse = target.factor / source.factor;
+        let turned = "1 " + target.symbol + " = " + formatTrimmed(inverse, RATE_DECIMALS) + " " + source.symbol;
+        return turned;
+    }
+    let line = "1 " + source.symbol + " = " + formatTrimmed(scale, RATE_DECIMALS) + " " + target.symbol;
+    return line;
+}

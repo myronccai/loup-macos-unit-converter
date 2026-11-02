@@ -1,0 +1,5 @@
+/.temp/
+/.loup-cache/
+/loup-macos-unit-converter
+*.loupbuild.fp
+.DS_Store

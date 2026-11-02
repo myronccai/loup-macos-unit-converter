@@ -1,0 +1,343 @@
+@mode(host.scripted)
+
+# Tests of units: the unit tables, the conversions (round trips, the affine
+# temperature scales), the result text with its rounding, and the rate line.
+#
+#   loup test --strict src
+
+from debug.assert import (expect, expectEq, expectThrows);
+from units import (LENGTH, MASS, TEMPERATURE, VOLUME, SPEED, DATA_SIZE, EMPTY_RESULT,
+    INVALID_RESULT, BELOW_ABSOLUTE_ZERO, TOO_LARGE_RESULT, categoryNames, unitsOf, unitAt,
+    unitIndexOf, unitTitles, defaultFrom, defaultTo, convert, decimalChoices, decimalsAt,
+    decimalLabels, resultText, rateText);
+
+## Whether `a` and `b` agree to within `tolerance` relative to their size.
+func near(a: float, b: float, tolerance: float): bool {
+    var diff = a - b;
+    if (diff < 0.0) {
+        diff = 0.0 - diff;
+    }
+    var size = b;
+    if (size < 0.0) {
+        size = 0.0 - size;
+    }
+    if (size < 1.0) {
+        size = 1.0;
+    }
+    let close = diff <= tolerance * size;
+    return close;
+}
+
+## The index of the unit with `symbol` in `category` (fails the test if none).
+## Deliberately a second, independent lookup rather than `unitIndexOf`: the
+## tests find their units with it, and test_unit_index_of_finds_symbols checks
+## the module's own lookup against the tables.
+func unitIndex(category: int, symbol: string): int {
+    let units = unitsOf(category);
+    var i = 0;
+    while (i < units.len()) {
+        if (units[i].symbol == symbol) {
+            return i;
+        }
+        i = i + 1;
+    }
+    expect(false, "no unit '" + symbol + "' in category " + category.to_string());
+    return -1;
+}
+
+func expectConverts(category: int, from_unit: string, to_unit: string, value: float, expected: float): void {
+    let got = convert(category, unitIndex(category, from_unit), unitIndex(category, to_unit), value);
+    let what = value.to_string() + " " + from_unit + " → " + to_unit + " gave " + got.to_string()
+        + ", expected " + expected.to_string();
+    expect(near(got, expected, 0.000000001), what);
+    return;
+}
+
+# ── the tables ───────────────────────────────────────────────────────────────
+
+func test_categories_are_in_popup_order(): void {
+    let names = categoryNames();
+    expectEq(names.len(), 6, "six categories");
+    expectEq(names[LENGTH], "Length", "length");
+    expectEq(names[MASS], "Mass", "mass");
+    expectEq(names[TEMPERATURE], "Temperature", "temperature");
+    expectEq(names[VOLUME], "Volume", "volume");
+    expectEq(names[SPEED], "Speed", "speed");
+    expectEq(names[DATA_SIZE], "Data size", "data size");
+    return;
+}
+
+func test_every_category_has_unique_titles_and_a_base_unit(): void {
+    var category = 0;
+    while (category < categoryNames().len()) {
+        let titles = unitTitles(category);
+        expect(titles.len() >= 4, "at least four units in " + category.to_string());
+        var i = 0;
+        while (i < titles.len()) {
+            var j = i + 1;
+            while (j < titles.len()) {
+                expect(titles[i] != titles[j], "duplicate title " + titles[i]);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        # Exactly one unit is the base unit itself (factor 1, offset 0).
+        var bases = 0;
+        for (u in unitsOf(category)) {
+            if (u.factor == 1.0 and u.offset == 0.0) {
+                bases = bases + 1;
+            }
+        }
+        expectEq(bases, 1, "one base unit in category " + category.to_string());
+        expect(defaultFrom(category) != defaultTo(category), "defaults differ");
+        expect(defaultTo(category) < titles.len(), "default To exists");
+        category = category + 1;
+    }
+    return;
+}
+
+func test_defaults_are_the_named_pairs(): void {
+    expectEq(defaultFrom(LENGTH), unitIndex(LENGTH, "km"), "length from km");
+    expectEq(defaultTo(LENGTH), unitIndex(LENGTH, "mi"), "length to mi");
+    expectEq(defaultFrom(MASS), unitIndex(MASS, "kg"), "mass from kg");
+    expectEq(defaultTo(MASS), unitIndex(MASS, "lb"), "mass to lb");
+    expectEq(defaultFrom(TEMPERATURE), unitIndex(TEMPERATURE, "°C"), "temperature from °C");
+    expectEq(defaultTo(TEMPERATURE), unitIndex(TEMPERATURE, "°F"), "temperature to °F");
+    expectEq(defaultFrom(VOLUME), unitIndex(VOLUME, "L"), "volume from L");
+    expectEq(defaultTo(VOLUME), unitIndex(VOLUME, "gal"), "volume to gal");
+    expectEq(defaultFrom(SPEED), unitIndex(SPEED, "km/h"), "speed from km/h");
+    expectEq(defaultTo(SPEED), unitIndex(SPEED, "mph"), "speed to mph");
+    expectEq(defaultFrom(DATA_SIZE), unitIndex(DATA_SIZE, "MB"), "data from MB");
+    expectEq(defaultTo(DATA_SIZE), unitIndex(DATA_SIZE, "MiB"), "data to MiB");
+    return;
+}
+
+func test_unit_index_of_finds_symbols(): void {
+    expectEq(unitIndexOf(LENGTH, "km"), unitIndex(LENGTH, "km"), "km");
+    expectEq(unitIndexOf(VOLUME, "fl oz"), unitIndex(VOLUME, "fl oz"), "a symbol with a space");
+    expectThrows(func(): void { unitIndexOf(LENGTH, "parsec"); }, "no such unit");
+    return;
+}
+
+func test_unit_titles_name_the_symbol(): void {
+    expectEq(unitAt(LENGTH, 3).title(), "Kilometer (km)", "kilometer");
+    expectEq(unitAt(TEMPERATURE, 1).title(), "Fahrenheit (°F)", "fahrenheit");
+    return;
+}
+
+func test_unknown_category_or_unit_is_an_error(): void {
+    expectThrows(func(): void { unitsOf(6); }, "category 6");
+    expectThrows(func(): void { unitAt(LENGTH, 99); }, "unit 99");
+    expectThrows(func(): void { unitAt(MASS, -1); }, "unit -1");
+    expectThrows(func(): void { decimalsAt(4); }, "segment 4");
+    return;
+}
+
+# ── conversions ──────────────────────────────────────────────────────────────
+
+func test_linear_conversions(): void {
+    expectConverts(LENGTH, "mi", "km", 1.0, 1.609344);
+    expectConverts(LENGTH, "ft", "in", 1.0, 12.0);
+    expectConverts(LENGTH, "nmi", "m", 2.0, 3704.0);
+    expectConverts(MASS, "lb", "oz", 1.0, 16.0);
+    expectConverts(MASS, "st", "lb", 1.0, 14.0);
+    expectConverts(VOLUME, "gal", "qt", 1.0, 4.0);
+    expectConverts(VOLUME, "cup", "tbsp", 1.0, 16.0);
+    expectConverts(VOLUME, "tbsp", "tsp", 1.0, 3.0);
+    expectConverts(VOLUME, "m³", "L", 1.0, 1000.0);
+    expectConverts(SPEED, "m/s", "km/h", 10.0, 36.0);
+    expectConverts(SPEED, "kn", "km/h", 1.0, 1.852);
+    expectConverts(DATA_SIZE, "B", "bit", 1.0, 8.0);
+    expectConverts(DATA_SIZE, "MiB", "KiB", 1.0, 1024.0);
+    expectConverts(DATA_SIZE, "GB", "MB", 1.5, 1500.0);
+    return;
+}
+
+func test_temperature_is_affine(): void {
+    expectConverts(TEMPERATURE, "°C", "°F", 0.0, 32.0);
+    expectConverts(TEMPERATURE, "°C", "°F", 100.0, 212.0);
+    expectConverts(TEMPERATURE, "°F", "°C", -40.0, -40.0);
+    expectConverts(TEMPERATURE, "°C", "K", 0.0, 273.15);
+    expectConverts(TEMPERATURE, "K", "°F", 0.0, -459.67);
+    expectConverts(TEMPERATURE, "°F", "°R", 32.0, 491.67);
+    expectConverts(TEMPERATURE, "°C", "°F", 37.0, 98.6);
+    # Doubling a Celsius temperature does not double it in Fahrenheit.
+    let ten = convert(TEMPERATURE, 0, 1, 10.0);
+    let twenty = convert(TEMPERATURE, 0, 1, 20.0);
+    expect(not near(twenty, 2.0 * ten, 0.001), "not a plain factor");
+    return;
+}
+
+func test_round_trips_return_the_value(): void {
+    let values = [0.0, 1.0, -40.0, 12.5, 98.6, 1000000.0, 0.003];
+    var category = 0;
+    while (category < categoryNames().len()) {
+        let n = unitsOf(category).len();
+        var from_unit = 0;
+        while (from_unit < n) {
+            var to_unit = 0;
+            while (to_unit < n) {
+                for (v in values) {
+                    let there = convert(category, from_unit, to_unit, v);
+                    let back = convert(category, to_unit, from_unit, there);
+                    expect(near(back, v, 0.000000001), "round trip " + category.to_string() + ": "
+                        + from_unit.to_string() + " → " + to_unit.to_string() + " of " + v.to_string());
+                }
+                to_unit = to_unit + 1;
+            }
+            from_unit = from_unit + 1;
+        }
+        category = category + 1;
+    }
+    return;
+}
+
+func test_same_unit_is_identity(): void {
+    expectConverts(TEMPERATURE, "°F", "°F", 72.5, 72.5);
+    expectConverts(LENGTH, "yd", "yd", 3.0, 3.0);
+    return;
+}
+
+# ── the result text and its rounding ─────────────────────────────────────────
+
+func test_result_text_rounds_to_the_chosen_decimals(): void {
+    let km = unitIndex(LENGTH, "km");
+    let mi = unitIndex(LENGTH, "mi");
+    expectEq(resultText(LENGTH, km, mi, "10", 0), "6 mi", "0 places");
+    expectEq(resultText(LENGTH, km, mi, "10", 2), "6.21 mi", "2 places");
+    expectEq(resultText(LENGTH, km, mi, "10", 4), "6.2137 mi", "4 places");
+    expectEq(resultText(LENGTH, km, mi, "10", 6), "6.213712 mi", "6 places");
+    expectEq(resultText(LENGTH, mi, km, "1,000", 2), "1,609.34 km", "grouped input and output");
+    return;
+}
+
+func test_result_text_for_temperatures(): void {
+    expectEq(resultText(TEMPERATURE, 0, 1, "100", 2), "212.00 °F", "boiling");
+    expectEq(resultText(TEMPERATURE, 1, 0, "-40", 0), "-40 °C", "the crossing point");
+    expectEq(resultText(TEMPERATURE, 0, 2, "-273.15", 2), "0.00 K", "absolute zero itself");
+    expectEq(resultText(TEMPERATURE, 0, 2, "-300", 2), BELOW_ABSOLUTE_ZERO, "colder than 0 K");
+    expectEq(resultText(TEMPERATURE, 2, 0, "-1", 2), BELOW_ABSOLUTE_ZERO, "negative kelvin");
+    return;
+}
+
+func test_result_text_for_empty_and_bad_input(): void {
+    expectEq(resultText(MASS, 2, 5, "", 2), EMPTY_RESULT, "empty");
+    expectEq(resultText(MASS, 2, 5, "  ", 2), EMPTY_RESULT, "blank");
+    expectEq(resultText(MASS, 2, 5, "ten", 2), INVALID_RESULT, "words");
+    expectEq(resultText(MASS, 2, 5, "1.2.3", 2), INVALID_RESULT, "two points");
+    return;
+}
+
+func test_result_text_rejects_a_decimal_comma(): void {
+    let km = unitIndex(LENGTH, "km");
+    let mi = unitIndex(LENGTH, "mi");
+    # "1,5" is 1.5 to much of the world: never read it as 15.
+    expectEq(resultText(LENGTH, km, mi, "1,5", 2), INVALID_RESULT, "a decimal comma");
+    expectEq(resultText(LENGTH, km, mi, "12,34", 2), INVALID_RESULT, "a group of two");
+    expectEq(resultText(LENGTH, km, mi, "1,2,3", 2), INVALID_RESULT, "groups of one");
+    expectEq(resultText(LENGTH, km, mi, "1,500", 2), "932.06 mi", "a real thousands separator");
+    return;
+}
+
+func test_result_text_too_large(): void {
+    let km = unitIndex(LENGTH, "km");
+    let mi = unitIndex(LENGTH, "mi");
+    let m = unitIndex(LENGTH, "m");
+    expectEq(resultText(LENGTH, km, mi, "1e400", 2), TOO_LARGE_RESULT, "the input overflows");
+    expectEq(resultText(LENGTH, mi, m, "1e306", 2), TOO_LARGE_RESULT, "the result overflows");
+    expectEq(resultText(LENGTH, m, km, "1e308", 2), "1.00e+305 km", "1e308 is a number");
+    return;
+}
+
+func test_result_text_never_rounds_a_tiny_value_to_zero(): void {
+    let mm = unitIndex(LENGTH, "mm");
+    let nmi = unitIndex(LENGTH, "nmi");
+    expectEq(resultText(LENGTH, mm, nmi, "1", 2), "5.40e-7 nmi", "1 mm in nautical miles");
+    expectEq(resultText(LENGTH, mm, nmi, "1", 6), "0.000001 nmi", "at 6 places it rounds to the last place");
+    expectEq(resultText(LENGTH, mm, nmi, "0.5", 6), "2.699784e-7 nmi", "at 6 places, would round to 0");
+    expectEq(resultText(DATA_SIZE, unitIndex(DATA_SIZE, "bit"), unitIndex(DATA_SIZE, "TiB"), "1", 2),
+        "1.14e-13 TiB", "1 bit in TiB");
+    expectEq(resultText(LENGTH, mm, nmi, "0", 2), "0.00 nmi", "zero is still zero");
+    expectEq(resultText(LENGTH, mm, nmi, "5000", 2), "2.70e-3 nmi", "would round to 0.00");
+    expectEq(resultText(LENGTH, mm, nmi, "10000", 2), "0.01 nmi", "rounds to the last place");
+    expectEq(resultText(LENGTH, mm, nmi, "100000", 2), "0.05 nmi", "small but showable");
+    let m = unitIndex(LENGTH, "m");
+    let km = unitIndex(LENGTH, "km");
+    expectEq(resultText(LENGTH, m, km, "500", 0), "1 km", "under one km at 0 places rounds to 1");
+    expectEq(resultText(LENGTH, m, km, "300", 0), "3e-1 km", "would round to 0 km");
+    let fts = unitIndex(SPEED, "ft/s");
+    let kmh = unitIndex(SPEED, "km/h");
+    expectEq(resultText(SPEED, fts, kmh, "0.5", 0), "1 km/h", "0.54864 km/h at 0 places");
+    return;
+}
+
+func test_result_text_keeps_subnormal_values_precise(): void {
+    # A plain-factor pair converts by its ratio, never through a base-unit
+    # value smaller still (1e-320 mm would be 1e-323 m, one digit).
+    let mm = unitIndex(LENGTH, "mm");
+    let cm = unitIndex(LENGTH, "cm");
+    let mg = unitIndex(MASS, "mg");
+    expectEq(resultText(LENGTH, mm, mm, "1e-320", 2), "1.00e-320 mm", "the same unit");
+    expectEq(resultText(LENGTH, cm, mm, "1e-320", 2), "1.00e-319 mm", "cm to mm");
+    expectEq(resultText(MASS, mg, mg, "1.23e-318", 2), "1.23e-318 mg", "milligrams (1.23e-324 kg is no double)");
+    return;
+}
+
+func test_result_text_keeps_fixed_point_at_every_precision(): void {
+    let gb = unitIndex(DATA_SIZE, "GB");
+    let bit = unitIndex(DATA_SIZE, "bit");
+    expectEq(resultText(DATA_SIZE, gb, bit, "1", 2), "8,000,000,000.00 bit", "2 places");
+    expectEq(resultText(DATA_SIZE, gb, bit, "1", 6), "8,000,000,000.000000 bit", "6 places");
+    expectEq(resultText(DATA_SIZE, gb, bit, "1,000,000", 6), "8.000000e+15 bit", "10^15 and above");
+    return;
+}
+
+func test_precision_choices(): void {
+    let choices = decimalChoices();
+    expectEq(choices.len(), 4, "four choices");
+    expectEq(decimalsAt(0), 0, "first");
+    expectEq(decimalsAt(3), 6, "last");
+    let labels = decimalLabels();
+    expectEq(labels[1], "2", "label");
+    return;
+}
+
+# ── the rate line ────────────────────────────────────────────────────────────
+
+func test_rate_text(): void {
+    expectEq(rateText(LENGTH, unitIndex(LENGTH, "km"), unitIndex(LENGTH, "mi")), "1 km = 0.621371 mi", "km in mi");
+    expectEq(rateText(LENGTH, unitIndex(LENGTH, "mi"), unitIndex(LENGTH, "m")), "1 mi = 1,609.344 m", "mi in m");
+    expectEq(rateText(LENGTH, unitIndex(LENGTH, "yd"), unitIndex(LENGTH, "yd")), "1 yd = 1 yd", "same unit");
+    expectEq(rateText(TEMPERATURE, unitIndex(TEMPERATURE, "K"), unitIndex(TEMPERATURE, "°R")), "1 K = 1.8 °R",
+        "two absolute scales are a plain factor");
+    expectEq(rateText(DATA_SIZE, unitIndex(DATA_SIZE, "bit"), unitIndex(DATA_SIZE, "TiB")),
+        "1 TiB = 8,796,093,022,208 bit", "tiny rates turn round");
+    return;
+}
+
+func test_rate_text_for_affine_pairs_is_a_formula(): void {
+    let c = unitIndex(TEMPERATURE, "°C");
+    let f = unitIndex(TEMPERATURE, "°F");
+    let k = unitIndex(TEMPERATURE, "K");
+    let r = unitIndex(TEMPERATURE, "°R");
+    expectEq(rateText(TEMPERATURE, c, f), "°F = °C × 1.8 + 32", "°C to °F");
+    expectEq(rateText(TEMPERATURE, f, c), "°C = (°F − 32) ÷ 1.8", "°F to °C");
+    expectEq(rateText(TEMPERATURE, k, c), "°C = K − 273.15", "K to °C");
+    expectEq(rateText(TEMPERATURE, c, k), "K = °C + 273.15", "°C to K");
+    expectEq(rateText(TEMPERATURE, f, k), "K = (°F + 459.67) ÷ 1.8", "°F to K");
+    expectEq(rateText(TEMPERATURE, k, f), "°F = K × 1.8 − 459.67", "K to °F");
+    expectEq(rateText(TEMPERATURE, r, f), "°F = °R − 459.67", "°R to °F");
+    expectEq(rateText(TEMPERATURE, c, r), "°R = °C × 1.8 + 491.67", "°C to °R");
+    return;
+}
+
+func test_rate_formula_agrees_with_convert(): void {
+    # °F = °C × 1.8 + 32 and °C = (°F − 32) ÷ 1.8, checked against convert.
+    let c = unitIndex(TEMPERATURE, "°C");
+    let f = unitIndex(TEMPERATURE, "°F");
+    for (v in [-40.0, 0.0, 37.0, 100.0]) {
+        expect(near(convert(TEMPERATURE, c, f, v), v * 1.8 + 32.0, 0.000000001), "°C formula at " + v.to_string());
+        expect(near(convert(TEMPERATURE, f, c, v), (v - 32.0) / 1.8, 0.000000001), "°F formula at " + v.to_string());
+    }
+    return;
+}

@@ -1,0 +1,486 @@
+@mode(host.native)
+
+# loup-macos-unit-converter — a unit converter window built from the appkit proxies.
+#
+#         Category:  [Length ▾]
+#             From:  [10        ]  [Kilometer (km) ▾]
+#                                       [⇅ Swap]
+#               To:  6.21 mi       [Mile (mi) ▾]
+#   Decimal places:  [0|2|4|6]
+#   ─────────────────────────────────────────
+#   1 km = 0.621371 mi            (for temperatures: °F = °C × 1.8 + 32)
+#
+# The controls ARE the state: the category, the two units, the typed text and
+# the precision are read back from them whenever one changes, and the model
+# (units.loup, numtext.loup — host.dual, tested by `loup test`) turns them
+# into the result and rate lines.
+#
+#   loup build && ./loup-macos-unit-converter
+#   ./loup-macos-unit-converter --self-test [screenshot.png]
+#
+# `--self-test` drives the window through its controls, menus and shortcuts
+# as a user would (picking pop-up items, typing into the field key by key,
+# clicking Swap, choosing a precision segment, menu items, ⌘2), prints what the
+# result and rate labels show after each step, optionally snapshots the window,
+# and quits. It uses only appkit proxies — no raw Objective-C.
+
+from appkit.app import (appInit, run, quit, after, isSelfTest, Window, Menu, addMenu,
+    menuBarMenu, MOD_COMMAND);
+from appkit.controls import (Label, Button, TextField, PopUpButton, SegmentedControl, systemColor,
+    COLOR_SECONDARY_LABEL, TEXT_RIGHT);
+from appkit.layout import (VStack, GridView, emptyCell, ALIGN_FILL, ALIGN_TRAILING, ALIGN_CENTER,
+    ALIGN_BASELINE);
+from appkit.dialogs import (copyText, pasteText, saveClipboard, restoreClipboard);
+from units import (categoryNames, unitTitles, defaultFrom, defaultTo, decimalsAt, decimalLabels,
+    resultText, rateText);
+
+## The precision segment selected at start (2 decimal places).
+const START_PRECISION: int = 1;
+## Width of the value column (the input field and the result).
+const VALUE_WIDTH: float = 230.0;
+## Width of the unit column (the pop-ups).
+const UNIT_WIDTH: float = 200.0;
+## Point size of the result, and the smallest it shrinks to so that a long
+## result ("1,897,797.257524 fl oz") still fits its column whole.
+const RESULT_SIZE: float = 17.0;
+const RESULT_MIN_SIZE: float = 10.0;
+## The grid's rows and columns.
+const ROW_CATEGORY: int = 0;
+const ROW_FROM: int = 1;
+const ROW_SWAP: int = 2;
+const ROW_TO: int = 3;
+const ROW_PRECISION: int = 4;
+const COLUMN_UNIT: int = 2;
+## The menus `buildMenus` adds to the menu bar, and the Convert menu's items.
+const CONVERT_MENU: string = "Convert";
+const CATEGORY_MENU: string = "Category";
+const SWAP_ITEM: string = "Swap Units";
+const COPY_ITEM: string = "Copy Result";
+
+## The window and every control the handlers read or write. The handlers
+## are its methods; `main` and `buildMenus` hook them up with closures that
+## capture the one `Ui`.
+class Ui {
+    pub let win: Window;
+    pub let category: PopUpButton;
+    pub let input: TextField;
+    pub let from_units: PopUpButton;
+    pub let to_units: PopUpButton;
+    pub let swap: Button;
+    pub let result: Label;
+    pub let precision: SegmentedControl;
+    pub let rate: Label;
+
+    pub func constructor() {
+        # The window is sized to its content once the layout is built.
+        let win = Window("Unit Converter", 100.0, 100.0);
+
+        let category = PopUpButton(categoryNames());
+        let input = TextField("1");
+        input.setPlaceholder("Enter a value");
+        let from_units = PopUpButton(unitTitles(0));
+        let to_units = PopUpButton(unitTitles(0));
+        let swap = Button("Swap");
+        swap.setSymbol("arrow.up.arrow.down");
+        swap.setToolTip("Swap the From and To units");
+        let result = Label("");
+        result.setFont(RESULT_SIZE, true);
+        result.setSelectable(true);
+        # One line: a long result is drawn smaller, down to RESULT_MIN_SIZE,
+        # rather than cut (the label refits on every setText).
+        result.setWraps(false);
+        result.setShrinkToFit(VALUE_WIDTH, RESULT_MIN_SIZE / RESULT_SIZE);
+        let precision = SegmentedControl(decimalLabels());
+        precision.setSelectedIndex(START_PRECISION);
+        precision.setToolTip("Decimal places in the result");
+        let rate = Label("");
+        # The system's secondary text color follows light and dark mode.
+        rate.applyTextColor(systemColor(COLOR_SECONDARY_LABEL));
+
+        let grid = GridView();
+        grid.addRow([formLabel("Category:"), category, emptyCell()]);
+        grid.addRow([formLabel("From:"), input, from_units]);
+        grid.addRow([emptyCell(), emptyCell(), swap]);
+        grid.addRow([formLabel("To:"), result, to_units]);
+        grid.addRow([formLabel("Decimal places:"), precision, emptyCell()]);
+        grid.mergeCells(ROW_CATEGORY, 1, 2);
+        grid.setColumnAlignment(0, ALIGN_TRAILING);
+        grid.setColumnAlignment(1, ALIGN_FILL);
+        grid.setColumnAlignment(COLUMN_UNIT, ALIGN_FILL);
+        grid.setColumnWidth(1, VALUE_WIDTH);
+        grid.setColumnWidth(COLUMN_UNIT, UNIT_WIDTH);
+        grid.setRowAlignment(ROW_FROM, ALIGN_BASELINE);
+        grid.setRowAlignment(ROW_TO, ALIGN_BASELINE);
+        grid.setRowAlignment(ROW_PRECISION, ALIGN_CENTER);
+        grid.setRowSpacing(10.0);
+        grid.setColumnSpacing(10.0);
+        # The Swap button keeps its natural width, centered under the From
+        # pop-up, in a column that otherwise fills.
+        grid.setCellXAlignment(COLUMN_UNIT, ROW_SWAP, ALIGN_CENTER);
+
+        let root = VStack();
+        root.setInsets(20.0, 20.0, 16.0, 20.0);
+        root.setSpacing(12.0);
+        # The separator and the rate line span the form's width.
+        root.setAlignment(ALIGN_FILL);
+        root.add(grid);
+        root.addSeparator();
+        root.add(rate);
+        win.setContent(root);
+
+        # Fit the window to the layout; it is not resizable (the columns have
+        # fixed widths, so more room would only be empty space).
+        win.setResizable(false);
+        win.fitToContent();
+
+        this.win = win;
+        this.category = category;
+        this.input = input;
+        this.from_units = from_units;
+        this.to_units = to_units;
+        this.swap = swap;
+        this.result = result;
+        this.precision = precision;
+        this.rate = rate;
+    }
+
+    # ── handlers ─────────────────────────────────────────────────────────────
+
+    ## Recompute the result and rate lines from the controls, and check the
+    ## current category in the Category menu.
+    pub func refresh(): void {
+        let category = this.category.selectedIndex();
+        let from_unit = this.from_units.selectedIndex();
+        let to_unit = this.to_units.selectedIndex();
+        let decimals = decimalsAt(this.precision.selectedIndex());
+        let result = resultText(category, from_unit, to_unit, this.input.text(), decimals);
+        this.result.setText(result);
+        this.result.setToolTip(result);
+        let rate = rateText(category, from_unit, to_unit);
+        this.rate.setText(rate);
+        let categories = menuBarMenu(CATEGORY_MENU);
+        var i = 0;
+        while (i < categories.itemCount()) {
+            categories.itemAt(i).setChecked(i == category);
+            i = i + 1;
+        }
+        return;
+    }
+
+    ## A new category: both unit pop-ups get its units and its default pair.
+    pub func categoryChanged(): void {
+        let category = this.category.selectedIndex();
+        let titles = unitTitles(category);
+        this.from_units.setItems(titles);
+        this.to_units.setItems(titles);
+        this.from_units.select(defaultFrom(category));
+        this.to_units.select(defaultTo(category));
+        this.refresh();
+        return;
+    }
+
+    ## Exchange the From and To units (the typed value stays).
+    pub func swapUnits(): void {
+        let from_unit = this.from_units.selectedIndex();
+        let to_unit = this.to_units.selectedIndex();
+        this.from_units.select(to_unit);
+        this.to_units.select(from_unit);
+        this.refresh();
+        return;
+    }
+
+    ## Put the result, as shown, on the clipboard.
+    pub func copyResult(): void {
+        let shown = this.result.text();
+        copyText(shown);
+        return;
+    }
+
+    ## Category `index` chosen from the Category menu: the same as picking it
+    ## in the category pop-up.
+    pub func chooseCategory(index: int): void {
+        this.category.select(index);
+        this.categoryChanged();
+        return;
+    }
+}
+
+## A right-aligned form label for the grid's first column.
+func formLabel(text: string): Label {
+    let l = Label(text);
+    l.setAlignment(TEXT_RIGHT);
+    return l;
+}
+
+# ── menus ────────────────────────────────────────────────────────────────────
+
+## The Convert menu (Swap Units ⇧⌘S, Copy Result ⇧⌘C) and the Category menu
+## (⌘1 … ⌘6) for `u`'s window, after the App, Edit and Window menus `appInit`
+## made. `refresh` finds the Category menu again in the menu bar by title.
+func buildMenus(u: Ui): void {
+    let convert = Menu(CONVERT_MENU);
+    # An upper-case key adds ⇧.
+    convert.addItem(SWAP_ITEM, "S", func(): void { u.swapUnits(); });
+    convert.addItem(COPY_ITEM, "C", func(): void { u.copyResult(); });
+    addMenu(convert);
+
+    let categories = Menu(CATEGORY_MENU);
+    let names = categoryNames();
+    var i = 0;
+    while (i < names.len()) {
+        let index = i;
+        let shortcut = (i + 1).to_string();
+        categories.addItem(names[i], shortcut, func(): void { u.chooseCategory(index); });
+        i = i + 1;
+    }
+    addMenu(categories);
+    return;
+}
+
+# ── self-test ────────────────────────────────────────────────────────────────
+
+## Print one line of what the window shows now, read back from the controls:
+## `step: category | from -> to | 'input' @decimals => result | rate`.
+func report(u: Ui, step: string): void {
+    let decimals = u.precision.labelAt(u.precision.selectedIndex());
+    let line = step + ": " + u.category.selectedTitle() + " | " + u.from_units.selectedTitle() + " -> "
+        + u.to_units.selectedTitle() + " | '" + u.input.text() + "' @" + decimals + " => "
+        + u.result.text() + " | " + u.rate.text();
+    println(line);
+    return;
+}
+
+## Replace the field's text by typing `text` over it, keystroke by keystroke
+## (⌘A, then one key at a time — the change handler runs for each); ""
+## deletes it (⌘A, Delete).
+func typeValue(u: Ui, text: string): void {
+    let input = u.input;
+    input.selectAll();
+    if (text.len() == 0) {
+        input.deleteBackward();
+        return;
+    }
+    for (key in text.chars()) {
+        input.typeKey(key);
+    }
+    return;
+}
+
+## Pick `title` in `popup` as a user would from its open menu (the pop-up's
+## action runs).
+func pick(popup: PopUpButton, title: string): void {
+    let titles = popup.items();
+    var i = 0;
+    while (i < titles.len()) {
+        if (titles[i] == title) {
+            popup.choose(i);
+            return;
+        }
+        i = i + 1;
+    }
+    throw ValueError("self-test: no item '" + title + "' in the pop-up");
+}
+
+## Pick segment `index` of the precision control (its action runs).
+func pickPrecision(u: Ui, index: int): void {
+    u.precision.setSelectedIndex(index);
+    u.precision.sendAction();
+    return;
+}
+
+## Choose `item` in the menu-bar menu `menu` as a click on it would; fails
+## the self-test when nothing ran.
+func chooseMenuItem(menu: string, item: string): void {
+    let sent = menuBarMenu(menu).itemWithTitle(item).perform();
+    if (not sent) {
+        throw RuntimeError("self-test: " + menu + " ▸ " + item + " did nothing");
+    }
+    return;
+}
+
+## Press the shortcut `key` with `modifiers` in the window; fails the
+## self-test when nothing took it.
+func pressShortcut(u: Ui, key: string, modifiers: int): void {
+    let taken = u.win.sendKey(key, modifiers);
+    if (not taken) {
+        throw RuntimeError("self-test: no menu item or control took the shortcut '" + key + "'");
+    }
+    return;
+}
+
+## The titles of the items checked in the Category menu.
+func checkedCategories(): string {
+    let categories = menuBarMenu(CATEGORY_MENU);
+    var checked = "";
+    var i = 0;
+    while (i < categories.itemCount()) {
+        let item = categories.itemAt(i);
+        if (item.checked()) {
+            checked = checked + item.title();
+        }
+        i = i + 1;
+    }
+    return checked;
+}
+
+## Whether the whole result fits its column (it is never cut off).
+func resultFits(u: Ui): string {
+    var fits = "no";
+    if (u.result.textWidth() <= VALUE_WIDTH) {
+        fits = "yes";
+    }
+    return fits;
+}
+
+func selfTest(u: Ui): void {
+    report(u, "start");
+
+    # Live conversion: clear the field (⌘A, Delete), then the result follows
+    # every keystroke.
+    typeValue(u, "");
+    report(u, "clear");
+    for (key in ["1", "2", ".", "5"]) {
+        u.input.typeKey(key);
+        report(u, "type " + key);
+    }
+
+    # Precision.
+    pickPrecision(u, 0);
+    report(u, "precision 0");
+    pickPrecision(u, 2);
+    report(u, "precision 4");
+    pickPrecision(u, 3);
+    report(u, "precision 6");
+    pickPrecision(u, 1);
+
+    # Swap, then another To unit.
+    u.swap.click();
+    report(u, "swap");
+    pick(u.to_units, "Foot (ft)");
+    report(u, "to foot");
+
+    # Temperature is affine.
+    pick(u.category, "Temperature");
+    report(u, "temperature");
+    typeValue(u, "100");
+    report(u, "boiling");
+    typeValue(u, "-40");
+    report(u, "crossing");
+    pick(u.to_units, "Kelvin (K)");
+    typeValue(u, "-273.15");
+    report(u, "absolute zero");
+    typeValue(u, "-300");
+    report(u, "too cold");
+    u.swap.click();
+    typeValue(u, "310.15");
+    report(u, "body temperature");
+    pick(u.to_units, "Kelvin (K)");
+    pick(u.from_units, "Rankine (°R)");
+    typeValue(u, "671.67");
+    report(u, "rankine");
+
+    # The other categories.
+    pick(u.category, "Mass");
+    typeValue(u, "150");
+    report(u, "mass");
+    typeValue(u, "1,5");
+    report(u, "decimal comma");
+    pick(u.category, "Volume");
+    pick(u.from_units, "Cup (cup)");
+    pick(u.to_units, "Milliliter (mL)");
+    typeValue(u, "2");
+    report(u, "volume");
+    pick(u.from_units, "Imperial gallon (imp gal)");
+    pick(u.to_units, "Fluid ounce (fl oz)");
+    typeValue(u, "12345.678");
+    pickPrecision(u, 3);
+    report(u, "long result");
+    println("long result fits: " + resultFits(u));
+    pickPrecision(u, 1);
+    pick(u.category, "Speed");
+    typeValue(u, "65");
+    u.swap.click();
+    report(u, "speed");
+    # At 0 places a result under one still rounds to a whole number; only one
+    # that would read as 0 turns to scientific notation.
+    pick(u.from_units, "Feet per second (ft/s)");
+    typeValue(u, "0.5");
+    pickPrecision(u, 0);
+    report(u, "under one at 0 places");
+    typeValue(u, "0.1");
+    report(u, "rounds to zero at 0 places");
+    pickPrecision(u, 1);
+    pick(u.category, "Data size");
+    typeValue(u, "500");
+    pick(u.from_units, "Gigabyte (GB)");
+    pick(u.to_units, "Gibibyte (GiB)");
+    report(u, "data size");
+    pick(u.to_units, "Bit (bit)");
+    typeValue(u, "1");
+    pickPrecision(u, 3);
+    report(u, "gigabit at 6 places");
+    pickPrecision(u, 1);
+    typeValue(u, "1,000,000");
+    report(u, "big number");
+    pick(u.from_units, "Bit (bit)");
+    pick(u.to_units, "Tebibyte (TiB)");
+    typeValue(u, "1");
+    report(u, "tiny result");
+    typeValue(u, "1e400");
+    report(u, "too large");
+
+    # Input the converter cannot read.
+    typeValue(u, "12abc");
+    report(u, "not a number");
+    typeValue(u, "");
+    report(u, "empty");
+
+    # The menus and their shortcuts: ⌘2 (Category ▸ Mass), then Category ▸
+    # Length, Convert ▸ Swap Units and Copy Result chosen from the menu bar.
+    pressShortcut(u, "2", MOD_COMMAND);
+    report(u, "key ⌘2");
+    chooseMenuItem(CATEGORY_MENU, "Length");
+    typeValue(u, "26.2");
+    report(u, "menu Length");
+    println("category menu check: " + checkedCategories());
+    chooseMenuItem(CONVERT_MENU, SWAP_ITEM);
+    report(u, "menu swap");
+    let saved = saveClipboard();
+    chooseMenuItem(CONVERT_MENU, COPY_ITEM);
+    println("menu copy: clipboard '" + pasteText() + "'");
+    restoreClipboard(saved);
+
+    # The window as the screenshot shows it: a marathon in kilometres.
+    pickPrecision(u, 2);
+    report(u, "final");
+
+    let args = runtime.args();
+    if (args.len() > 1) {
+        u.win.snapshot(args[1]);
+    }
+    quit();
+    return;
+}
+
+pub func main(): void {
+    appInit("Unit Converter");
+    let u = Ui();
+    buildMenus(u);
+
+    u.category.onChange(func(): void { u.categoryChanged(); });
+    u.from_units.onChange(func(): void { u.refresh(); });
+    u.to_units.onChange(func(): void { u.refresh(); });
+    u.input.onChange(func(): void { u.refresh(); });
+    u.precision.onChange(func(): void { u.refresh(); });
+    u.swap.onClick(func(): void { u.swapUnits(); });
+
+    # Start on Length, kilometres to miles, converting 1.
+    u.category.select(0);
+    u.categoryChanged();
+
+    if (isSelfTest()) {
+        after(0.3, func(): void { selfTest(u); });
+    }
+    run(u.win);
+    return;
+}

@@ -1,0 +1,39 @@
+start: Length | Kilometer (km) -> Mile (mi) | '1' @2 => 0.62 mi | 1 km = 0.621371 mi
+clear: Length | Kilometer (km) -> Mile (mi) | '' @2 => — | 1 km = 0.621371 mi
+type 1: Length | Kilometer (km) -> Mile (mi) | '1' @2 => 0.62 mi | 1 km = 0.621371 mi
+type 2: Length | Kilometer (km) -> Mile (mi) | '12' @2 => 7.46 mi | 1 km = 0.621371 mi
+type .: Length | Kilometer (km) -> Mile (mi) | '12.' @2 => 7.46 mi | 1 km = 0.621371 mi
+type 5: Length | Kilometer (km) -> Mile (mi) | '12.5' @2 => 7.77 mi | 1 km = 0.621371 mi
+precision 0: Length | Kilometer (km) -> Mile (mi) | '12.5' @0 => 8 mi | 1 km = 0.621371 mi
+precision 4: Length | Kilometer (km) -> Mile (mi) | '12.5' @4 => 7.7671 mi | 1 km = 0.621371 mi
+precision 6: Length | Kilometer (km) -> Mile (mi) | '12.5' @6 => 7.767140 mi | 1 km = 0.621371 mi
+swap: Length | Mile (mi) -> Kilometer (km) | '12.5' @2 => 20.12 km | 1 mi = 1.609344 km
+to foot: Length | Mile (mi) -> Foot (ft) | '12.5' @2 => 66,000.00 ft | 1 mi = 5,280 ft
+temperature: Temperature | Celsius (°C) -> Fahrenheit (°F) | '12.5' @2 => 54.50 °F | °F = °C × 1.8 + 32
+boiling: Temperature | Celsius (°C) -> Fahrenheit (°F) | '100' @2 => 212.00 °F | °F = °C × 1.8 + 32
+crossing: Temperature | Celsius (°C) -> Fahrenheit (°F) | '-40' @2 => -40.00 °F | °F = °C × 1.8 + 32
+absolute zero: Temperature | Celsius (°C) -> Kelvin (K) | '-273.15' @2 => 0.00 K | K = °C + 273.15
+too cold: Temperature | Celsius (°C) -> Kelvin (K) | '-300' @2 => Below absolute zero | K = °C + 273.15
+body temperature: Temperature | Kelvin (K) -> Celsius (°C) | '310.15' @2 => 37.00 °C | °C = K − 273.15
+rankine: Temperature | Rankine (°R) -> Kelvin (K) | '671.67' @2 => 373.15 K | 1 °R = 0.555556 K
+mass: Mass | Kilogram (kg) -> Pound (lb) | '150' @2 => 330.69 lb | 1 kg = 2.204623 lb
+decimal comma: Mass | Kilogram (kg) -> Pound (lb) | '1,5' @2 => Not a number | 1 kg = 2.204623 lb
+volume: Volume | Cup (cup) -> Milliliter (mL) | '2' @2 => 473.18 mL | 1 cup = 236.588237 mL
+long result: Volume | Imperial gallon (imp gal) -> Fluid ounce (fl oz) | '12345.678' @6 => 1,897,797.257524 fl oz | 1 imp gal = 153.72159 fl oz
+long result fits: yes
+speed: Speed | Miles per hour (mph) -> Kilometers per hour (km/h) | '65' @2 => 104.61 km/h | 1 mph = 1.609344 km/h
+under one at 0 places: Speed | Feet per second (ft/s) -> Kilometers per hour (km/h) | '0.5' @0 => 1 km/h | 1 ft/s = 1.09728 km/h
+rounds to zero at 0 places: Speed | Feet per second (ft/s) -> Kilometers per hour (km/h) | '0.1' @0 => 1e-1 km/h | 1 ft/s = 1.09728 km/h
+data size: Data size | Gigabyte (GB) -> Gibibyte (GiB) | '500' @2 => 465.66 GiB | 1 GB = 0.931323 GiB
+gigabit at 6 places: Data size | Gigabyte (GB) -> Bit (bit) | '1' @6 => 8,000,000,000.000000 bit | 1 GB = 8,000,000,000 bit
+big number: Data size | Gigabyte (GB) -> Bit (bit) | '1,000,000' @2 => 8.00e+15 bit | 1 GB = 8,000,000,000 bit
+tiny result: Data size | Bit (bit) -> Tebibyte (TiB) | '1' @2 => 1.14e-13 TiB | 1 TiB = 8,796,093,022,208 bit
+too large: Data size | Bit (bit) -> Tebibyte (TiB) | '1e400' @2 => Too large | 1 TiB = 8,796,093,022,208 bit
+not a number: Data size | Bit (bit) -> Tebibyte (TiB) | '12abc' @2 => Not a number | 1 TiB = 8,796,093,022,208 bit
+empty: Data size | Bit (bit) -> Tebibyte (TiB) | '' @2 => — | 1 TiB = 8,796,093,022,208 bit
+key ⌘2: Mass | Kilogram (kg) -> Pound (lb) | '' @2 => — | 1 kg = 2.204623 lb
+menu Length: Length | Kilometer (km) -> Mile (mi) | '26.2' @2 => 16.28 mi | 1 km = 0.621371 mi
+category menu check: Length
+menu swap: Length | Mile (mi) -> Kilometer (km) | '26.2' @2 => 42.16 km | 1 mi = 1.609344 km
+menu copy: clipboard '42.16 km'
+final: Length | Mile (mi) -> Kilometer (km) | '26.2' @4 => 42.1648 km | 1 mi = 1.609344 km

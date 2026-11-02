@@ -1,0 +1,240 @@
+@mode(host.scripted)
+
+# Tests of numtext: reading typed numbers and writing them for display.
+#
+#   loup test --strict src
+
+from debug.assert import (expect, expectEq);
+from numtext import (parseNumber, trimSpaces, isFinite, formatFixed, formatScientific, formatResult,
+    formatTrimmed);
+
+## Whether `a` and `b` differ by less than `tolerance`.
+func near(a: float, b: float, tolerance: float): bool {
+    var diff = a - b;
+    if (diff < 0.0) {
+        diff = 0.0 - diff;
+    }
+    let close = diff < tolerance;
+    return close;
+}
+
+func expectParsed(text: string, expected: float): void {
+    let p = parseNumber(text);
+    expect(p.ok, "'" + text + "' should parse");
+    expect(near(p.value, expected, 0.000000001), "'" + text + "' parsed to " + p.value.to_string());
+    return;
+}
+
+func expectRejected(text: string): void {
+    let p = parseNumber(text);
+    expect(not p.ok, "'" + text + "' should not parse");
+    return;
+}
+
+# ── parseNumber ──────────────────────────────────────────────────────────────
+
+func test_parse_integers_and_fractions(): void {
+    expectParsed("0", 0.0);
+    expectParsed("42", 42.0);
+    expectParsed("12.5", 12.5);
+    expectParsed(".5", 0.5);
+    expectParsed("7.", 7.0);
+    expectParsed("0.1", 0.1);
+    return;
+}
+
+func test_parse_signs_spaces_and_grouping(): void {
+    expectParsed("-40", -40.0);
+    expectParsed("+3", 3.0);
+    expectParsed("  98.6 ", 98.6);
+    expectParsed("1,234.5", 1234.5);
+    expectParsed("1,000,000", 1000000.0);
+    expectParsed("12,345", 12345.0);
+    expectParsed("123,456.75", 123456.75);
+    expectParsed("-1,000", -1000.0);
+    expectParsed("1,000e3", 1000000.0);
+    return;
+}
+
+func test_parse_rejects_misplaced_commas(): void {
+    # A comma is a thousands separator only before a group of exactly three
+    # digits: a decimal comma ("1,5") is not silently read as 15.
+    expectRejected("1,5");
+    expectRejected("12,34");
+    expectRejected("1,2,3");
+    expectRejected("1,23");
+    expectRejected("1,2345");
+    expectRejected("1234,567");
+    expectRejected("1,000,00");
+    expectRejected("1,000,0000");
+    expectRejected("1,,000");
+    expectRejected("1,000.5,0");
+    expectRejected("0,5");
+    # A first group that starts with 0 is not a thousands group: "0,500"
+    # with a decimal comma means 0.5, so it must not read as 500.
+    expectRejected("0,500");
+    expectRejected("-0,500");
+    expectRejected("012,345");
+    expectRejected("00,000");
+    expectParsed("0500", 500.0);
+    expectParsed("10,500", 10500.0);
+    return;
+}
+
+func test_parse_exponents(): void {
+    expectParsed("1e3", 1000.0);
+    expectParsed("2.5E-2", 0.025);
+    expectParsed("-1.5e+2", -150.0);
+    expectParsed("1e-400", 0.0);
+    expectParsed("1e-99999999999999", 0.0);
+    return;
+}
+
+func test_parse_large_exponents(): void {
+    # No arbitrary cap: anything a double holds is a number.
+    let big = parseNumber("1e308");
+    expect(big.ok, "1e308 is a double");
+    expect(near(big.value / 1.0e300, 100000000.0, 0.000001), "1e308 value");
+    let near_max = parseNumber("1.79e308");
+    expect(near_max.ok, "1.79e308 is a double");
+    expect(isFinite(near_max.value), "finite");
+    let tiny_mantissa = parseNumber("0.0000000001e310");
+    expect(tiny_mantissa.ok, "a small mantissa with a large exponent");
+    expect(near(tiny_mantissa.value / 1.0e300, 1.0, 0.000001), "1e300");
+    # Beyond a double: not a number, and marked as an overflow.
+    for (text in ["1e309", "1e400", "-2e400", "1e99999999999999"]) {
+        let p = parseNumber(text);
+        expect(not p.ok, "'" + text + "' is too large");
+        expect(p.overflow, "'" + text + "' overflows");
+    }
+    let bad = parseNumber("12abc");
+    expect(not bad.overflow, "a non-number is not an overflow");
+    return;
+}
+
+func test_is_finite(): void {
+    let huge = 1.0e308 * 10.0;
+    expect(isFinite(0.0), "zero");
+    expect(isFinite(-1.0e308), "large");
+    expect(not isFinite(huge), "infinity");
+    expect(not isFinite(0.0 - huge), "minus infinity");
+    expect(not isFinite(huge - huge), "NaN");
+    return;
+}
+
+func test_parse_rejects_non_numbers(): void {
+    expectRejected("");
+    expectRejected("   ");
+    expectRejected("-");
+    expectRejected(".");
+    expectRejected("abc");
+    expectRejected("12abc");
+    expectRejected("1.2.3");
+    expectRejected("1e");
+    expectRejected(",5");
+    expectRejected("5,");
+    expectRejected("--5");
+    expectRejected("5 €");
+    expectRejected("°5");
+    return;
+}
+
+func test_trim_spaces(): void {
+    expectEq(trimSpaces("  a b \t"), "a b", "inner spaces stay");
+    expectEq(trimSpaces(""), "", "empty stays empty");
+    expectEq(trimSpaces("   "), "", "only spaces");
+    return;
+}
+
+# ── formatting ───────────────────────────────────────────────────────────────
+
+func test_format_fixed_rounds_to_the_decimals(): void {
+    expectEq(formatFixed(0.621371, 0), "1", "0 decimals rounds");
+    expectEq(formatFixed(0.621371, 2), "0.62", "2 decimals");
+    expectEq(formatFixed(0.621371, 4), "0.6214", "4 decimals round up");
+    expectEq(formatFixed(0.621371, 6), "0.621371", "6 decimals");
+    expectEq(formatFixed(2.5, 0), "3", "half rounds away from zero");
+    expectEq(formatFixed(-2.5, 0), "-3", "negative half rounds away from zero");
+    expectEq(formatFixed(1.005, 1), "1.0", "1.005 to one place");
+    expectEq(formatFixed(0.05, 2), "0.05", "leading zeros in the fraction");
+    return;
+}
+
+func test_format_fixed_groups_thousands(): void {
+    expectEq(formatFixed(1609.344, 2), "1,609.34", "four digits");
+    expectEq(formatFixed(1000000.0, 0), "1,000,000", "a million");
+    expectEq(formatFixed(999.999, 2), "1,000.00", "rounding carries into a new group");
+    expectEq(formatFixed(-1234567.891, 1), "-1,234,567.9", "negative");
+    expectEq(formatFixed(123.0, 0), "123", "three digits need no comma");
+    return;
+}
+
+func test_format_fixed_never_writes_negative_zero(): void {
+    expectEq(formatFixed(-0.001, 2), "0.00", "rounds to zero");
+    expectEq(formatFixed(0.0, 4), "0.0000", "zero");
+    return;
+}
+
+func test_format_large_values_in_scientific_notation(): void {
+    expectEq(formatFixed(150000000000000000000.0, 2), "1.50e+20", "1.5e20");
+    expectEq(formatFixed(-3.0e18, 0), "-3e+18", "negative, no decimals");
+    expectEq(formatScientific(0.000123, 1), "1.2e-4", "small value");
+    expectEq(formatScientific(9.996, 2), "1.00e+1", "rounding renormalizes");
+    expectEq(formatScientific(0.0, 2), "0.00e+0", "zero");
+    expectEq(formatScientific(1.0e308, 2), "1.00e+308", "the top of a double's range");
+    expectEq(formatScientific(1.0e308 * 10.0, 2), "Infinity", "infinity");
+    return;
+}
+
+func test_format_fixed_switch_does_not_depend_on_precision(): void {
+    # Choosing more places never turns a readable number into an exponent.
+    expectEq(formatFixed(8000000000.0, 2), "8,000,000,000.00", "8e9, 2 places");
+    expectEq(formatFixed(8000000000.0, 6), "8,000,000,000.000000", "8e9, 6 places");
+    expectEq(formatFixed(1500000000.25, 6), "1,500,000,000.250000", "1.5e9, 6 places");
+    expectEq(formatFixed(999999999999999.0, 0), "999,999,999,999,999", "just below 10^15");
+    expectEq(formatFixed(999999999.9999999, 6), "1,000,000,000.000000", "the fraction carries");
+    expectEq(formatFixed(-1609343998.390656, 6), "-1,609,343,998.390656", "negative, 6 places");
+    expectEq(formatFixed(1000000000000000.0, 0), "1e+15", "10^15");
+    expectEq(formatFixed(1000000000000000.0, 6), "1.000000e+15", "10^15 at 6 places");
+    return;
+}
+
+func test_format_result_never_shows_zero_for_a_tiny_value(): void {
+    expectEq(formatResult(0.00054, 2), "5.40e-4", "would round to 0.00");
+    expectEq(formatResult(-0.00054, 2), "-5.40e-4", "negative");
+    expectEq(formatResult(0.0049, 2), "4.90e-3", "just below half a place");
+    expectEq(formatResult(0.0054, 2), "0.01", "rounds to 0.01, so it stays fixed");
+    expectEq(formatResult(-0.0054, 2), "-0.01", "negative, rounds away from zero");
+    expectEq(formatResult(0.00054, 6), "0.000540", "fits at 6 places");
+    expectEq(formatResult(0.0000004, 6), "4.000000e-7", "would round to 0.000000");
+    expectEq(formatResult(0.3, 0), "3e-1", "would round to 0");
+    expectEq(formatResult(0.5, 0), "1", "half rounds away from zero at 0 places");
+    expectEq(formatResult(0.54864, 0), "1", "under one, but not zero, at 0 places");
+    expectEq(formatResult(1.0, 0), "1", "1 at 0 places");
+    expectEq(formatResult(0.01, 2), "0.01", "exactly 10^-2 at 2 places");
+    expectEq(formatResult(0.0, 2), "0.00", "zero is zero");
+    expectEq(formatResult(1234.5, 2), "1,234.50", "ordinary values");
+    expectEq(formatResult(1.5e20, 2), "1.50e+20", "large values");
+    return;
+}
+
+func test_format_trimmed_drops_trailing_zeros(): void {
+    expectEq(formatTrimmed(0.621371, 6), "0.621371", "nothing to drop");
+    expectEq(formatTrimmed(1609.344, 6), "1,609.344", "zeros dropped");
+    expectEq(formatTrimmed(1000.0, 6), "1,000", "the point dropped too");
+    expectEq(formatTrimmed(33.8, 6), "33.8", "33.8");
+    expectEq(formatTrimmed(0.0000001, 6), "0", "rounds to zero");
+    expectEq(formatTrimmed(8796093022208.0, 6), "8,796,093,022,208", "large values keep fixed point");
+    return;
+}
+
+func test_format_round_trips_through_parse(): void {
+    let values = [0.0, 1.5, -40.0, 1234.5678, 0.000123, 98.6];
+    for (v in values) {
+        let text = formatFixed(v, 6);
+        let back = parseNumber(text);
+        expect(back.ok, "'" + text + "' parses back");
+        expect(near(back.value, v, 0.0000005), "'" + text + "' round-trips");
+    }
+    return;
+}
